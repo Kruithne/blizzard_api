@@ -1,7 +1,8 @@
 <?php
 	require_once(__DIR__ . '/util.php');
 
-	define('API_URL', 'https://%s.api.battle.net/wow/%%s?locale=en_GB&apikey=%s');
+	define('API_URL', 'https://%s.api.blizzard.com/wow/%%s?locale=en_GB&access_token=%%s');
+	define('TOKEN_URL', 'https://%s.battle.net/oauth/token');
 	define('ICON_URL', 'https://render-%s.worldofwarcraft.com/icons/%d/%s.jpg');
 	define('URL_PARAM', '&%s=%s');
 	define('CONFIG_DIRECTORY', __DIR__ . '/../cfg');
@@ -50,10 +51,16 @@
 		private $regions;
 
 		/**
-		 * Private API key.
+		 * OAuth Client Key
 		 * @var string
 		 */
-		private $apiKey;
+		private $clientKey;
+
+		/**
+		 * OAuth Client Secret
+		 * @var string
+		 */
+		private $clientSecret;
 
 		/**
 		 * Currently selected region ID.
@@ -74,6 +81,12 @@
 		private $selectedRegionURL;
 
 		/**
+		 * OAuth Token URL formatted for the current region.
+		 * @var
+		 */
+		private $selectedRegionTokenURL;
+
+		/**
 		 * API constructor.
 		 * @throws APIException
 		 */
@@ -89,7 +102,8 @@
 		public function setRegion($regionID) {
 			$this->selectedRegionID = $regionID;
 			$this->selectedRegion = &$this->regionData->$regionID;
-			$this->selectedRegionURL = sprintf(API_URL, $regionID, $this->apiKey);
+			$this->selectedRegionURL = sprintf(API_URL, $regionID);
+			$this->selectedRegionTokenURL = sprintf(TOKEN_URL, $regionID);
 		}
 
 		/**
@@ -197,7 +211,7 @@
 		public function getIconImagePath($iconID, $size = 36, $download = false, $dir = null) {
 			// Ensure the directory for this size exists.
 			if ($dir === null)
-				$dir = sprintf($dir, $size);
+				$dir = sprintf(ICON_DIR, $size);
 
 			if (!file_exists($dir))
 				mkdir($dir);
@@ -269,7 +283,33 @@
 		 * @return mixed
 		 */
 		private function requestEndpoint($endpoint, $params = null) {
-			return json_decode(file_get_contents($this->formatEndpointURL($endpoint, $params)));
+			$handle = curl_init();
+			curl_setopt($handle, CURLOPT_URL, $this->formatEndpointURL($endpoint, $params));
+			curl_setopt($handle, CURLOPT_RETURNTRANSFER, 1);
+			curl_setopt($handle, CURLOPT_CUSTOMREQUEST, "GET");
+			$res = curl_exec($handle);
+			curl_close($handle);
+
+			return json_decode($res);
+		}
+
+		/**
+		 * Request an access token for OAuth
+		 * @return mixed
+		 * @throws APIException
+		 */
+		private function requestAccessToken() {
+			$handle = curl_init($this->selectedRegionTokenURL);
+			$data = ['grant_type' => 'client_credentials', 'client_id' => $this->clientKey, 'client_secret' => $this->clientSecret];
+			curl_setopt($handle, CURLOPT_RETURNTRANSFER, 1);
+			curl_setopt($handle, CURLOPT_POST, true);
+			curl_setopt($handle, CURLOPT_POSTFIELDS, http_build_query($data));
+			$resp = json_decode(curl_exec($handle));
+
+			if (!isset($resp->access_token))
+				throw new APIException('Unable to obtain OAuth token from API');
+
+			return $resp->access_token;
 		}
 
 		/**
@@ -277,9 +317,11 @@
 		 * @param string $endpoint
 		 * @param array|null $params
 		 * @return string
+		 * @throws APIException
 		 */
 		private function formatEndpointURL($endpoint, $params = null) {
-			$url = sprintf($this->selectedRegionURL, $endpoint);
+			$token = $this->requestAccessToken();
+			$url = sprintf($this->selectedRegionURL, $endpoint, $token);
 
 			if (is_array($params))
 				foreach ($params as $key => $value)
@@ -297,10 +339,14 @@
 				throw new APIException('Unable to locate API configuration file %s', API_CONFIG_FILE);
 
 			$config = file_get_json(API_CONFIG_FILE);
-			if (!isset($config->key))
-				throw new APIException('Configuration file does not define API key property `key`');
+			if (!isset($config->clientKey))
+				throw new APIException('Configuration file does not define API property `clientKey`');
 
-			$this->apiKey = $config->key;
+			if (!isset($config->clientSecret))
+				throw new APIException('Configuration file does not define API property `clientSecret`');
+
+			$this->clientKey = $config->clientKey;
+			$this->clientSecret = $config->clientSecret;
 		}
 
 		/**
